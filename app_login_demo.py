@@ -1,6 +1,7 @@
 from flask import Flask, request, render_template_string, session, redirect, url_for
 import sqlite3
-import hashlib
+import time
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 app.secret_key = 'chave_super_secreta_123'  # Chave fraca propositalmente
@@ -64,13 +65,13 @@ DASHBOARD_PAGE = """
     
     <h3>Buscar Usuários</h3>
     <form method="GET" action="/search">
-        <input type="text" name="q" placeholder="Digite o nome..." value="{{ search_query|safe }}">
+        <input type="text" name="q" placeholder="Digite o nome..." value="{{ search_query }}">
         <button type="submit">Buscar</button>
     </form>
     
     {% if search_query %}
         <div class="info">
-            <p>Resultados para: {{ search_query|safe }}</p>
+            <p>Resultados para: {{ search_query }}</p>
         </div>
     {% endif %}
     
@@ -155,24 +156,25 @@ def init_db():
     """Inicializa o banco de dados com usuários de exemplo"""
     conn = sqlite3.connect('vulnerable_app.db')
     c = conn.cursor()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS users
+
+    # recria a tabela com campos para controle de tentativas e bloqueio
+    c.execute('DROP TABLE IF EXISTS users')
+    c.execute('''CREATE TABLE users
                  (id INTEGER PRIMARY KEY, username TEXT, password TEXT, 
-                  email TEXT, phone TEXT, cpf TEXT)''')
-    
-    # Limpa e insere usuários de teste
-    c.execute('DELETE FROM users')
-    
+                  email TEXT, phone TEXT, cpf TEXT,
+                  failed_attempts INTEGER DEFAULT 0,
+                  lockout_until INTEGER DEFAULT 0)''')
+
     users = [
-        (1, 'admin', hashlib.md5('admin123'.encode()).hexdigest(), 
-         'admin@empresa.com', '11-98765-4321', '123.456.789-00'),
-        (2, 'user1', hashlib.md5('pass1'.encode()).hexdigest(), 
-         'user1@email.com', '11-91234-5678', '987.654.321-00'),
-        (3, 'user2', hashlib.md5('pass2'.encode()).hexdigest(), 
-         'user2@email.com', '11-95555-6666', '456.789.123-00')
+        (1, 'admin', generate_password_hash('admin123'),
+         'admin@empresa.com', '11-98765-4321', '123.456.789-00', 0, 0),
+        (2, 'user1', generate_password_hash('pass1'),
+         'user1@email.com', '11-91234-5678', '987.654.321-00', 0, 0),
+        (3, 'user2', generate_password_hash('pass2'),
+         'user2@email.com', '11-95555-6666', '456.789.123-00', 0, 0)
     ]
-    
-    c.executemany('INSERT INTO users VALUES (?,?,?,?,?,?)', users)
+
+    c.executemany('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)', users)
     conn.commit()
     conn.close()
 
@@ -184,34 +186,59 @@ def index():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    """
-    VULNERABILIDADE 1: SQL Injection
-    VULNERABILIDADE 4: Sem proteção contra brute force
-    """
     error = None
     
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        password_hash = hashlib.md5(password.encode()).hexdigest()
-        
-        # SQL INJECTION VULNERÁVEL - NÃO usa prepared statements
         conn = sqlite3.connect('vulnerable_app.db')
         c = conn.cursor()
-        
-        # VULNERÁVEL: concatenação direta na query
-        query = f"SELECT * FROM users WHERE username = '{username}' AND password = '{password_hash}'"
-        
+
         try:
-            c.execute(query)
+            # Buscamos o usuário por username (query parametrizada)
+            c.execute('SELECT * FROM users WHERE username = ?', (username,))
             user = c.fetchone()
-            conn.close()
-            
+
             if user:
-                session['user_id'] = user[0]
-                session['username'] = user[1]
-                return redirect(url_for('dashboard'))
+                now = int(time.time())
+                failed_attempts = user[6]
+                lockout_until = user[7]
+
+                # Verifica se a conta está em lockout
+                if lockout_until and lockout_until > now:
+                    wait = lockout_until - now
+                    error = f"Conta bloqueada. Tente novamente em {wait} segundos."
+                    conn.close()
+                    return render_template_string(LOGIN_PAGE, error=error)
+
+                # Verifica senha
+                if check_password_hash(user[2], password):
+                    # sucesso -> reset de tentativas
+                    c.execute('UPDATE users SET failed_attempts = 0, lockout_until = 0 WHERE id = ?', (user[0],))
+                    conn.commit()
+                    conn.close()
+                    session['user_id'] = user[0]
+                    session['username'] = user[1]
+                    return redirect(url_for('dashboard'))
+                else:
+                    # falha -> incrementa contador e aplica lockout se necessário
+                    failed_attempts = failed_attempts + 1
+                    lockout_until_new = 0
+                    # Limite de tentativas antes do bloqueio
+                    LIMIT = 5
+                    if failed_attempts >= LIMIT:
+                        # bloqueio progressivo: 2^(failed-LIMIT) minutos, limitado a 60 minutos
+                        exponent = failed_attempts - LIMIT
+                        minutes = min(60, 2 ** exponent)
+                        lockout_until_new = now + (minutes * 60)
+
+                    c.execute('UPDATE users SET failed_attempts = ?, lockout_until = ? WHERE id = ?', (failed_attempts, lockout_until_new, user[0]))
+                    conn.commit()
+                    conn.close()
+                    error = "Credenciais inválidas"
             else:
+                # usuário não existe -> resposta genérica (não vazar existência)
+                conn.close()
                 error = "Credenciais inválidas"
         except Exception as e:
             error = f"Erro: {str(e)}"
@@ -241,13 +268,10 @@ def dashboard():
 
 @app.route('/search')
 def search():
-    """
-    VULNERABILIDADE 3: Reflected XSS
-    """
+
     if 'user_id' not in session:
         return redirect(url_for('login'))
     
-    # XSS VULNERÁVEL - não sanitiza o input do usuário
     search_query = request.args.get('q', '')
     
     conn = sqlite3.connect('vulnerable_app.db')
@@ -262,7 +286,6 @@ def search():
                                  user_id=session['user_id'],
                                  users=users,
                                  search_query=search_query)
-
 
 @app.route('/user_home')
 def user_home():
@@ -287,25 +310,23 @@ def user_home():
 
 @app.route('/profile/<int:user_id>')
 def profile(user_id):
-    """
-    VULNERABILIDADE 2: IDOR (Insecure Direct Object Reference)
-    Não verifica se o usuário tem permissão para ver o perfil
-    """
     if 'user_id' not in session:
         return redirect(url_for('login'))
-    
-    # IDOR VULNERÁVEL - não verifica autorização
-    # Deveria verificar se session['user_id'] == user_id
-    
+
+    # Verificação de autorização (corrige IDOR):
+    # só permite ver o perfil se for o próprio usuário ou se for admin
+    if session.get('user_id') != user_id and session.get('username') != 'admin':
+        return "Proibido", 403
+
     conn = sqlite3.connect('vulnerable_app.db')
     c = conn.cursor()
     c.execute('SELECT * FROM users WHERE id = ?', (user_id,))
     user = c.fetchone()
     conn.close()
-    
+
     if not user:
         return "Usuário não encontrado", 404
-    
+
     return render_template_string(PROFILE_PAGE, 
                                  user=user, 
                                  session_user_id=session['user_id'])
