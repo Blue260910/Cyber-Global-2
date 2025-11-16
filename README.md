@@ -1,3 +1,9 @@
+### Desenvolvedores
+
+- **Victor Aranda** - RM 99667
+- **Julia Lins** - RM 98690
+- **Luis Barreto** - RM 99210
+
 # Demo: Aplicação Vulnerável (para estudo)
 
 Este repositório contém uma aplicação Flask intencionalmente vulnerável para fins educacionais.
