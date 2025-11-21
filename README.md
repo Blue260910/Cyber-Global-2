@@ -4,6 +4,15 @@
 - **Julia Lins** - RM 98690
 - **Luis Barreto** - RM 99210
 
+---
+## 🔗 Links Principais
+
+🏆 **[Pitch do Projeto para Global Solution](https://youtu.be/9UL5fSXV-Ko)**
+
+🌐 **[COMPASS Platform (Site Web)](https://compass-app-kappa.vercel.app/)**
+
+---
+
 # Demo: Aplicação Vulnerável (para estudo)
 
 Este repositório contém uma aplicação Flask intencionalmente vulnerável para fins educacionais.
